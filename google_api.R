@@ -43,5 +43,6 @@ get_data = function(api_url){
 
 # To Complete
 parse_data = function(json){
-  
+  elements <- json["rows"]$rows$elements
+  return(as.data.frame(elements))
 }
