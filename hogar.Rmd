@@ -1,0 +1,437 @@
+---
+title: "Escogiendo un hogar"
+author: "Cesar Jose Rodriguez Diaz"
+date: "10 de marzo de 2016"
+output: html_document
+---
+
+Primero instalamos y declaramos los paquetes necesarios
+
+```{r, message=F, warning=F}
+#install.packages('curl')
+#install.packages('xlsx')
+library('curl')
+library('xlsx')
+```
+
+Cargamos el archivo fuente para usar el API de Google
+
+```{r, message=F, warning=F}
+source('google_api.R')
+```
+
+
+Cargamos el data set del xlsx codificado como UTF-8
+
+```{r, message=F, warning=F}
+dataSet = read.xlsx("hogares.xlsx", sheetIndex = 1, startRow = 1, endRow = 104, header = T, encoding = 'UTF-8')
+```
+
+
+Empezamos el preprocesamiento arreglando unas direcciones malas para poder obterner con exito la distacias del API de Google
+
+```{r, message=F, warning=F}
+dataSet$Dirección <- as.character(dataSet$Dirección)
+dataSet$Distrito <- as.character(dataSet$Distrito)
+dataSet$Dirección[11] <- "Galliate"
+dataSet$Dirección[33] <- "Via San Roberto Bellarmino"
+dataSet$Dirección[61] <- "Via di Monte Verde"
+```
+
+Creamos una columna para la duracion, y seteamos nuestra Key del API y la direccion de destino
+
+```{r, message=F, warning=F}
+dataSet$Duracion <- 0
+googleApiKey <- 'AIzaSyBekPZxKRhaB4kbaa90sx4ZoK4-OJImWAM'
+destino <- 'Piazzale Aldo Moro' #Sapienza Universidad de Roma
+```
+
+Aqui concatenamos el distrito y direccion de cada individuo para que el origen sea mas preciso y llamamos al API de Google. Si la resuesta no encuentra ningun resultado volvemos a hacer la llamada sin pasarle el distrito.
+
+```{r, message=F, warning=F}
+for (i in 1:nrow(dataSet)){
+  dataSet$Dirección[i] <- gsub("\n", " ", dataSet$Dirección[i])
+  dataSet$Distrito[i] <- gsub("\n", " ", dataSet$Distrito[i])
+  origen <- paste(c(dataSet$Dirección[i]," ",dataSet$Distrito[i]), collapse="") 
+  googleUrl <- get_url(origen, destino, googleApiKey)
+  googleData <- get_data(googleUrl)
+  googleJson = parse_data(googleData)
+  if(googleJson$status == "OK"){
+    dataSet$Duracion[i] <- googleJson$duration$value
+    
+  }else{
+    origen <- dataSet$Dirección[i]
+    googleUrl <- get_url(origen, destino, googleApiKey)
+    googleData <- get_data(googleUrl)
+    googleJson = parse_data(googleData)
+    if(googleJson$status == "OK"){
+      dataSet$Duracion[i] = googleJson$duration$value
+    }
+  }
+}
+```
+
+Categorizamos la columna Tipo de Inmueble. 0 para Apartamento y 1 para apartamento pequeño o tipo estudio.
+
+```{r, message=F, warning=F}
+dataSet$Tipo.de.Inmueble <- as.character(dataSet$Tipo.de.Inmueble)
+dataSet$Tipo.de.Inmueble[grepl("Ap", dataSet$Tipo.de.Inmueble)] <- '0'
+dataSet$Tipo.de.Inmueble[grepl("Mini", dataSet$Tipo.de.Inmueble)] <- '1'
+dataSet$Tipo.de.Inmueble[grepl("Monolocale", dataSet$Tipo.de.Inmueble)] <- '1'
+dataSet$Tipo.de.Inmueble <- as.numeric(dataSet$Tipo.de.Inmueble)
+```
+
+Creamos dos columnas saber si tiene entrada y cocina respectivamente.
+
+```{r, message=F, warning=F}
+dataSet$Entrada <- 0
+dataSet$Entrada[grepl("(ngresso)", dataSet$Descripción)] <- 1
+
+dataSet$Cocina <- 0
+dataSet$Cocina[grepl("(cucina)", dataSet$Descripción)] <- 1
+```
+
+Añadimos una columna para la cantidad de baños.
+
+```{r, message=F, warning=F}
+dataSet$Bano <- 0
+dataSet$Bano[grepl("(bagno)", dataSet$Descripción)] <- 1
+dataSet$Bano[grepl("(2.?bagni)", dataSet$Descripción)] <- 2
+dataSet$Bano[grepl("(4.?bagni)", dataSet$Descripción)] <- 3
+dataSet$Bano[grepl("(3.?bagni)", dataSet$Descripción)] <- 4
+```
+
+Tres columnas mas para saber si tiene calefaccion, si se paga condominio y se cobran servicios aparte.
+
+```{r, message=F, warning=F}
+dataSet$Calefaccion <- 0
+dataSet$Calefaccion[grepl("(riscaldamento)", dataSet$Precio.Mensual)] <- 1
+
+dataSet$condominio <- 0
+dataSet$condominio[grepl("(condominio)", dataSet$Precio.Mensual)] <- 1
+
+dataSet$NoServicios <- 0
+dataSet$NoServicios[grepl("(escluse)", dataSet$Precio.Mensual)] <- 1
+```
+
+Extraemos los generos admitidos en el hogar, 0 para hombres, 1 para mujer y 2 para ambos.
+
+```{r, message=F, warning=F}
+dataSet$Genero.admitido <- -1
+dataSet$Genero.admitido[grepl("(ragazzi)", dataSet$Notas)] <-  0
+dataSet$Genero.admitido[grepl("(ragazze)", dataSet$Notas)] <-  1
+dataSet$Genero.admitido[grepl('(ragazze.i) | (ragazzi.e) | (ragazzi.ragazze) | (ragazze.ragazzi)', dataSet$Notas)] <-  2
+dataSet$Genero.admitido[39] <- 2
+```
+
+Aqui creamos una columna para el precio y otra para el tipo de habitacion. 0 es simple, 1 es doble, 2 es una cama en habitacion doble y 3 el apartamento completo.
+
+Solo extraemos la informacion de los individuos que solo tiene una habitacion disponible.
+
+```{r, message=F, warning=F}
+dataSet$Precio <- -1
+dataSet$Habitacion <- -1
+dataSet$Habitaciones.Disponibles <- as.character(dataSet$Habitaciones.Disponibles)
+dataSet$Precio.Mensual <- as.character(dataSet$Precio.Mensual)
+for (i in 1:nrow(dataSet)){
+  aux <- strsplit(dataSet$Precio.Mensual[i], '[^[:digit:]]')
+  aux <- matrix(unlist(aux), ncol=1, byrow=TRUE)
+  aux <- aux[aux!='',]
+  if (length(aux) == 1){
+    dataSet$Precio[i] <- as.numeric(aux[1])
+    if (grepl("(ingol)", dataSet$Habitaciones.Disponibles[i])) dataSet$Habitacion[i] <- 0
+    if (grepl("(doppi)", dataSet$Habitaciones.Disponibles[i])) dataSet$Habitacion[i] <- 1
+    if (grepl("(posto)", dataSet$Habitaciones.Disponibles[i])) dataSet$Habitacion[i] <- 2
+    if (grepl("(ntero)", dataSet$Habitaciones.Disponibles[i])) dataSet$Habitacion[i] <- 3
+  }
+}
+```
+
+Los 29 registros restantes los generamos a mano ya que buscar una solucion general llevaria mas tiempo y no tendra un gran uso. Para registros con mas de una habitacion se generaron nuevas filas con la misma informacion variando el precio y el tipo de habitacion si es que era requerido.
+
+```{r, message=F, warning=F, echo=F}
+#El resto a pata
+aux <-  dataSet[4,]
+aux$Habitacion <- 1
+aux$Precio <- as.numeric(450)
+dataSet$Habitacion[4] <- 0
+dataSet$Precio[4] <- as.numeric(300)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[5,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(450)
+dataSet$Habitacion[5] <- 0
+dataSet$Precio[5] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[7,]
+aux$Habitacion <- 1
+aux$Precio <- as.numeric(450)
+dataSet$Habitacion[7] <- 0
+dataSet$Precio[7] <- as.numeric(250)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[10,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(350)
+dataSet$Habitacion[10] <- 0
+dataSet$Precio[10] <- as.numeric(550)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[16,]
+dataSet$Habitacion[16] <- 0
+dataSet$Precio[16] <- as.numeric(460)
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(460)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(430)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(430)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[18,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(450)
+dataSet$Habitacion[18] <- 0
+dataSet$Precio[18] <- as.numeric(400)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[21,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(475)
+dataSet$Habitacion[21] <- 0
+dataSet$Precio[21] <- as.numeric(525)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(575)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[22,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(525)
+dataSet$Habitacion[22] <- 0
+dataSet$Precio[22] <- as.numeric(575)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[23,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(475)
+dataSet$Habitacion[23] <- 0
+dataSet$Precio[23] <- as.numeric(525)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(575)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[24,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(380)
+dataSet$Habitacion[24] <- 0
+dataSet$Precio[24] <- as.numeric(350)
+dataSet <- rbind(dataSet, aux)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[26,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(400)
+dataSet$Habitacion[26] <- 0
+dataSet$Precio[26] <- as.numeric(420)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(380)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[31,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(250)
+dataSet$Habitacion[31] <- 0
+dataSet$Precio[31] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[41,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(350)
+dataSet$Habitacion[41] <- 0
+dataSet$Precio[41] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[42,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(450)
+dataSet$Habitacion[42] <- 0
+dataSet$Precio[42] <- as.numeric(500)
+dataSet <- rbind(dataSet, aux)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(420)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[43,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(450)
+dataSet$Habitacion[43] <- 0
+dataSet$Precio[43] <- as.numeric(500)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[44,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(400)
+dataSet$Habitacion[44] <- 0
+dataSet$Precio[44] <- as.numeric(370)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(340)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[56,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(550)
+dataSet$Habitacion[56] <- 0
+dataSet$Precio[56] <- as.numeric(500)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[61,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(425)
+dataSet$Habitacion[61] <- 0
+dataSet$Precio[61] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(475)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[72,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(350)
+dataSet$Habitacion[72] <- 0
+dataSet$Precio[72] <- as.numeric(430)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+dataSet$Habitacion[74] <- 0
+dataSet$Precio[74] <- as.numeric(450)
+###############################################+++
+aux <-  dataSet[76,]
+aux$Habitacion <- 3
+aux$Precio <- as.numeric(850)
+dataSet$Habitacion[76] <- 0
+dataSet$Precio[76] <- as.numeric(425)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[77,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(350)
+dataSet$Habitacion[77] <- 0
+dataSet$Precio[77] <- as.numeric(550)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[81,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(325)
+dataSet$Habitacion[81] <- 0
+dataSet$Precio[81] <- as.numeric(550)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[84,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(475)
+dataSet$Habitacion[84] <- 2
+dataSet$Precio[84] <- as.numeric(375)
+dataSet <- rbind(dataSet, aux)
+aux$Precio <- as.numeric(525)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[85,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(300)
+dataSet$Habitacion[85] <- 0
+dataSet$Precio[85] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[87,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(475)
+dataSet$Habitacion[87] <- 0
+dataSet$Precio[87] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[88,]
+aux$Habitacion <- 2
+aux$Precio <- as.numeric(300)
+dataSet$Habitacion[88] <- 0
+dataSet$Precio[88] <- as.numeric(450)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[93,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(600)
+dataSet$Habitacion[93] <- 0
+dataSet$Precio[93] <- as.numeric(500)
+dataSet <- rbind(dataSet, aux)
+###############################################+++
+aux <-  dataSet[99,]
+aux$Habitacion <- 0
+aux$Precio <- as.numeric(600)
+dataSet$Habitacion[99] <- 0
+dataSet$Precio[99] <- as.numeric(550)
+dataSet <- rbind(dataSet, aux)
+###############################################
+dataSet$Habitacion[45] <- 3
+dataSet$Habitacion[90] <- 3
+```
+
+Eliminamos columnas inecesarias
+
+```{r, message=F, warning=F}
+dataSet$Distrito <- NULL
+dataSet$Dirección <- NULL 
+dataSet$Notas <- NULL
+dataSet$Descripción <- NULL
+dataSet$Foto <- NULL
+dataSet$Piso <- NULL
+dataSet$Habitaciones.Disponibles <- NULL
+dataSet$Precio.Mensual <- NULL
+```
+
+Generamos el modelo de prediccion usando regresion lineal
+
+```{r, message=F, warning=F}
+regresion <- lm(Precio ~ . , data = dataSet)
+```
+
+Verificamos alginas graficas del modelo
+
+```{r, message=F, warning=F}
+plot(regresion)
+```
+
+Creamos una consulta segun las categorias explicadas anteriormente 
+
+```{r, message=F, warning=F}
+aux <- dataSet[1,]
+aux$Tipo.de.Inmueble <- 0 # 1 para tipo estudio
+aux$Entrada <- 1 # 1 para que tenga entrada
+aux$Cocina <- 1 # 1 para que tenga cocina
+aux$Bano <- 1 # Cantidad de baños 
+aux$Calefaccion <- 1 # 1 para calefaccion
+aux$condominio <- 1 # 1 para pagar condominio
+aux$NoServicios <- 1 # 1 para que no incluya servicios aparte
+aux$Genero.admitido <- 2 # 0 hombre, 1 mujer, 2 ambos
+aux$Habitacion <- 2 # 0 simple, 1 doble, 2 cama en hab doble, 3 todo el apto
+myDireccion <- 'Piazza dei Re di Roma' # Direccion o zona donde quieres
+```
+
+Consultamos la disctancia en el API 
+
+```{r, message=F, warning=F}
+googleUrl <- get_url(myDireccion, destino, googleApiKey)
+googleData <- get_data(googleUrl)
+googleJson <- parse_data(googleData)
+if(googleJson$status == "OK"){
+  myDuracion <- googleJson$duration$value
+}
+aux$Duracion <- myDuracion
+```
+
+Predecimos el costo del Hogar segun el modelo generado 
+
+```{r, message=F, warning=F}
+prediccion <- predict(regresion, newdata = aux)
+prediccion
+```
